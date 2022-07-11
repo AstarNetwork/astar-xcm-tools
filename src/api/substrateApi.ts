@@ -9,34 +9,32 @@ import {
     AssetMetadata,
     AssetDetails,
     MultiAsset,
-    AssetBalance
+    AssetBalance,
 } from '@polkadot/types/interfaces';
-import { ChainAccount } from './Account';
+import { ChainAccount } from './account';
 import BN from 'bn.js';
-import { ExtrinsicPayload, ChainProperty, ChainAsset } from '../types';
+import { ExtrinsicPayload, ChainProperty, ChainAsset, TransferToPara } from '../types';
 import { decodeAddress } from '@polkadot/util-crypto';
-import Web3 from 'web3';
 
 const AUTO_CONNECT_MS = 10_000; // [ms]
 
-interface IXcmChain {
-    xcmExecute: (message: VersionedXcm, maxWeight: BN) => ExtrinsicPayload;
-    xcmSend: (dest: MultiLocation, message: VersionedXcm) => ExtrinsicPayload;
-    xcmReserveTransferAsset: (
-        dest: MultiLocation,
-        beneficiary: MultiLocation,
-        assets: MultiAsset,
-        feeAssetItem: BN,
+export interface IXcmChain {
+    transferToParachain: (
+        recipientAccountId: string,
+        amount: BN,
+        paraId: number,
+        transferFunc: TransferToPara,
     ) => ExtrinsicPayload;
+    transferToRelaychain: (recipientAccountId: string, amount: BN, transferFunc: TransferToPara) => ExtrinsicPayload;
 }
 
-// WIP
-interface IEvmChain {
-    evmApiInst: Web3;
-    start: () => Promise<void>;
+// todo: avoid using the asset pallet data type directly, and try to make this more generic
+export interface IAssetPallet {
+    getAssetBalance: (assetId: BN, account: ChainAccount) => Promise<AssetBalance>;
+    fetchAssets: () => Promise<ChainAsset[]>;
 }
 
-class ChainApi {
+export class ChainApi {
     private _provider: WsProvider;
     private _api: ApiPromise;
     private _chainProperty: ChainProperty;
@@ -192,13 +190,6 @@ export class ParachainApi extends ChainApi implements IXcmChain {
         return this._paraId;
     }
 
-    public xcmExecute(message: VersionedXcm, maxWeight: BN) {
-        return this.buildTxCall('polkadotXcm', 'execute', message, maxWeight);
-    }
-    public xcmSend(dest: MultiLocation, message: VersionedXcm) {
-        return this.buildTxCall('polkadotXcm', 'send', dest, message);
-    }
-
     public xcmReserveTransferAsset(
         dest: MultiLocation,
         beneficiary: MultiLocation,
@@ -208,85 +199,18 @@ export class ParachainApi extends ChainApi implements IXcmChain {
         return this.buildTxCall('polkadotXcm', 'reserveTransferAssets', dest, beneficiary, assets, feeAssetItem);
     }
 
-    // note: this function is not working correctly!
-    public transferToRelaychain(recipientAccountId: string, amount: BN) {
-        // the relaychain that the current parachain is connected to
-        const dest = {
-            V1: {
-                interior: 'Here',
-                parents: new BN(1),
-            },
-        };
-        // the account ID within the relaychain
-        const beneficiary = {
-            V1: {
-                interior: {
-                    X1: {
-                        AccountId32: {
-                            network: 'Any',
-                            id: decodeAddress(recipientAccountId),
-                        },
-                    },
-                },
-                parents: new BN(0),
-            },
-        };
-        // amount of fungible tokens to be transferred
-        const assets = {
-            V1: [
-                {
-                    fun: {
-                        Fungible: amount,
-                    },
-                    id: {
-                        Concrete: {
-                            interior: 'Here',
-                            parents: new BN(1),
-                        },
-                    },
-                },
-            ],
-        };
-
-        return this.buildTxCall('polkadotXcm', 'reserveWithdrawAssets', dest, beneficiary, assets, new BN(0));
+    public transferToRelaychain(recipientAccountId: string, amount: BN, transferFunc: TransferToPara) {
+        // we use 0 to refer to the relaychain
+        return transferFunc(this, amount, 'native', 0, recipientAccountId);
     }
 
-    public async getAssetBalance(assetId: BN, account: ChainAccount) {
-        const assetBalance = await this.buildStorageQuery('assets', 'account', assetId, account.pair.address);
-        return assetBalance as AssetBalance;
-    }
-
-    public async fetchAssets() {
-        // note that this function requires the chain to implement the Assets pallet
-
-        // note: The asset ID will have different meanings depending on the range
-        // 1 ~ 2^32-1 = User-defined assets. Anyone can register this assets on chain.
-        // 2^32 ~ 2^64-1 = Statemine/Statemint assets map. This is a direct map of all the assets stored in the common-goods state chain.
-        // 2^64 ~ 2^128-1 = Ecosystem assets like native assets on another parachain or other valuable tokens.
-        // 2^128 ~ 1 = Relaychain native token (DOT or KSM).
-
-        const assetsListRaw = await this.apiInst.query.assets.asset.entries();
-        const assetMetadataListRaw = await this.apiInst.query.assets.metadata.entries();
-
-        //const assetIds = assetIdsRaw.map((i) => i.toHuman() as string).flat().map((i) => i.replaceAll(',', ''));
-        const assetInfos = assetsListRaw.map((i, index) => {
-            const assetId = (i[0].toHuman() as string[])[0].replaceAll(',', '');
-            //const assetId = i[0].toHuman() as any as AssetId;
-            const assetInfo = i[1].toHuman() as any as AssetDetails;
-            const metadata = assetMetadataListRaw[index][1].toHuman() as any as AssetMetadata;
-            return {
-                id: assetId,
-                ...assetInfo,
-                metadata,
-            } as ChainAsset;
-        });
-        // convert the list into a string array of numbers without the comma and no nested entries
-
-        return assetInfos;
+    // the implementation differs from parachain to parachain
+    public transferToParachain(recipientAccountId: string, amount: BN, paraId: number, transferFunc: TransferToPara) {
+        return transferFunc(this, amount, 'native', paraId, recipientAccountId);
     }
 }
 
-export class RelaychainApi extends ChainApi implements IXcmChain {
+export class RelaychainApi extends ChainApi {
     private _parachains: number[];
 
     constructor(endpoint: string) {
@@ -307,7 +231,7 @@ export class RelaychainApi extends ChainApi implements IXcmChain {
     }
 
     public transferToParachain(toPara: number, recipientAccountId: string, amount: BN) {
-        // the target parachain connected to the current relaychain
+        // sends the native token to another parachain
         const dest = {
             V1: {
                 interior: {
@@ -315,7 +239,7 @@ export class RelaychainApi extends ChainApi implements IXcmChain {
                         Parachain: new BN(toPara),
                     },
                 },
-                parents: new BN(0),
+                parents: new BN(1),
             },
         };
         // the account ID within the destination parachain

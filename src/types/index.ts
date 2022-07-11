@@ -1,4 +1,7 @@
 import { SubmittableExtrinsic } from '@polkadot/api/types';
+import { ChainApi } from '../api';
+import BN from 'bn.js';
+
 export * from './assets';
 
 export type ExtrinsicPayload = SubmittableExtrinsic<'promise'>;
@@ -10,3 +13,11 @@ export interface ChainProperty {
     chainName: string;
     ss58Prefix: number;
 }
+
+export type TransferToPara = (
+    api: ChainApi,
+    amount: BN,
+    assetId: string,
+    paraId: number,
+    recipientAccountId: string,
+) => ExtrinsicPayload;
